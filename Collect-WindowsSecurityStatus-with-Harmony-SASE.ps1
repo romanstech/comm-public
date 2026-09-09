@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 
 [CmdletBinding()]
 param(
@@ -37,9 +37,10 @@ catch {
 $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $safeComputerName = ($env:COMPUTERNAME -replace '[^A-Za-z0-9_.-]', '_')
 $reportPath = Join-Path $OutputDirectory "Windows-Security-Report-${safeComputerName}-${timestamp}.txt"
-$gpoReportPath = Join-Path $OutputDirectory "GPO-Report-${safeComputerName}-${timestamp}.html"
 $osqueryExe = 'C:\Program Files\Perimeter 81\bin\osqueryi.exe'
 $report = New-Object System.Collections.Generic.List[string]
+$collectionStep = 0
+$totalCollectionSteps = 12
 
 function Add-Line {
     param([AllowEmptyString()][string]$Text = '')
@@ -60,6 +61,12 @@ function Add-CommandResult {
         [Parameter(Mandatory)][scriptblock]$Command
     )
 
+    $script:collectionStep++
+    $stepNumber = $script:collectionStep
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+    Write-Host ("[{0}/{1}] {2} ..." -f $stepNumber, $script:totalCollectionSteps, $Title) -ForegroundColor Cyan
+
     Add-Section $Title
     try {
         $result = & $Command 2>&1
@@ -72,6 +79,10 @@ function Add-CommandResult {
     }
     catch {
         Add-Line ("ERROR: {0}" -f $_.Exception.Message)
+    }
+    finally {
+        $stopwatch.Stop()
+        Write-Host ("      Completed in {0:N1} seconds" -f $stopwatch.Elapsed.TotalSeconds) -ForegroundColor DarkGray
     }
 }
 
@@ -91,6 +102,12 @@ Add-Line ("User:                     {0}\{1}" -f $env:USERDOMAIN, $env:USERNAME)
 Add-Line ("PowerShell:               {0}" -f $PSVersionTable.PSVersion)
 Add-Line ("Running as administrator: {0}" -f $isAdmin)
 Add-Line 'Collection mode: read-only; this script does not change security settings.'
+
+Write-Host
+Write-Host 'Windows Security Diagnostic Collector' -ForegroundColor Green
+Write-Host ("Computer: {0}    User: {1}\{2}" -f $env:COMPUTERNAME, $env:USERDOMAIN, $env:USERNAME)
+Write-Host ("Collecting {0} diagnostic sections. Please wait..." -f $totalCollectionSteps)
+Write-Host
 
 Add-CommandResult 'HARMONY SASE CLIENT VERSION' {
     Get-ItemProperty `
@@ -229,73 +246,6 @@ Add-CommandResult "DEFENDER ERRORS AND WARNINGS FROM THE LAST $EventDays DAYS" {
         Format-List
 }
 
-Add-CommandResult 'WINDOWS SECURITY SERVICES: 10 SAMPLES AT 15-SECOND INTERVALS' {
-    1..10 | ForEach-Object {
-        "Sample $_ of 10 - $(Get-Date -Format 'HH:mm:ss')"
-        Get-Service wscsvc, SecurityHealthService, WinDefend -ErrorAction Continue |
-            Select-Object Name, Status, StartType |
-            Format-Table -AutoSize
-        Start-Sleep -Seconds 15
-    }
-}
-
-Add-CommandResult 'OSQUERY: WINDOWS SECURITY CENTER' {
-    if (-not (Test-Path -LiteralPath $osqueryExe)) {
-        throw "osqueryi.exe was not found: $osqueryExe"
-    }
-
-    & $osqueryExe 'SELECT * FROM windows_security_center;'
-}
-
-Add-CommandResult 'OSQUERY: WINDOWS SECURITY CENTER GOOD STATUS CHECK' {
-    if (-not (Test-Path -LiteralPath $osqueryExe)) {
-        throw "osqueryi.exe was not found: $osqueryExe"
-    }
-
-    & $osqueryExe "SELECT * FROM windows_security_center WHERE firewall = 'Good' AND antivirus = 'Good' AND windows_security_center_service = 'Good';"
-}
-
-Add-CommandResult 'MICROSOFT ENTRA ID / DEVICE REGISTRATION STATUS' {
-    & "$env:SystemRoot\System32\dsregcmd.exe" /status
-}
-
-Add-CommandResult 'WMI REPOSITORY VERIFICATION' {
-    & "$env:SystemRoot\System32\wbem\winmgmt.exe" /verifyrepository
-}
-
-Add-CommandResult 'GROUP POLICY RESULT' {
-    & "$env:SystemRoot\System32\gpresult.exe" /h $gpoReportPath /f
-    if (Test-Path -LiteralPath $gpoReportPath) {
-        "HTML report created: $gpoReportPath"
-    }
-    else {
-        throw "The Group Policy HTML report was not created: $gpoReportPath"
-    }
-}
-
-Add-CommandResult 'SECURITY CENTER ANTIVIRUS PRODUCTS (REQUESTED QUERY)' {
-    Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName 'AntiVirusProduct' -ErrorAction Stop
-}
-
-Add-CommandResult 'SECURITY CENTER FIREWALL PRODUCTS' {
-    Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName 'FirewallProduct' -ErrorAction Stop
-}
-
-Add-CommandResult 'MICROSOFT DEFENDER REQUESTED STATUS FIELDS' {
-    if (-not (Get-Command Get-MpComputerStatus -ErrorAction SilentlyContinue)) {
-        throw 'The Get-MpComputerStatus command is not available.'
-    }
-
-    Get-MpComputerStatus -ErrorAction Stop |
-        Select-Object AntivirusEnabled,
-                      RealTimeProtectionEnabled,
-                      AMServiceEnabled,
-                      AntivirusSignatureAge,
-                      AntivirusSignatureLastUpdated,
-                      IsTamperProtected |
-        Format-List
-}
-
 Add-Section 'NOTES'
 Add-Line 'The decoded productState fields use the same interpretation as the original diagnostic script; RawState is included for verification.'
 Add-Line 'If a third-party antivirus is installed, Microsoft Defender may be in passive mode or disabled.'
@@ -304,6 +254,8 @@ if (-not $isAdmin) {
     Add-Line 'The script was not run as administrator. Some information or events may be unavailable.'
 }
 
+Write-Host
+Write-Host '[Report] Saving diagnostic report...' -ForegroundColor Cyan
 try {
     $utf8Bom = New-Object System.Text.UTF8Encoding($true)
     [IO.File]::WriteAllLines($reportPath, $report, $utf8Bom)
@@ -318,10 +270,19 @@ Write-Host 'Done. The security report was saved to:' -ForegroundColor Green
 Write-Host $reportPath -ForegroundColor Cyan
 Write-Host
 Write-Host 'Please send this TXT file to your support contact.'
-if (Test-Path -LiteralPath $gpoReportPath) {
-    Write-Host 'Please also send this Group Policy report:' -ForegroundColor Green
-    Write-Host $gpoReportPath -ForegroundColor Cyan
-    Write-Host
-}
+Write-Host
+Write-Host '[Log Collector] Downloading Check Point support Log Collector...' -ForegroundColor Yellow
+$logCollectorUrl = 'https://supportbucketshare.s3.us-east-1.amazonaws.com/Custom+Scripts/Log+Collector/Log+Collector+PS.ps1'
 
-Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://supportbucketshare.s3.us-east-1.amazonaws.com/Custom+Scripts/Log+Collector/Log+Collector+PS.ps1'))
+try {
+    $downloadTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $logCollectorScript = (New-Object System.Net.WebClient).DownloadString($logCollectorUrl)
+    $downloadTimer.Stop()
+    Write-Host ("[Log Collector] Download completed in {0:N1} seconds. Starting collector..." -f $downloadTimer.Elapsed.TotalSeconds) -ForegroundColor Green
+    Write-Host 'The Log Collector may take additional time and can produce its own output.' -ForegroundColor DarkGray
+    Write-Host
+    Invoke-Expression $logCollectorScript
+}
+catch {
+    Write-Host ("[Log Collector] ERROR: {0}" -f $_.Exception.Message) -ForegroundColor Red
+}
