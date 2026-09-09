@@ -280,6 +280,75 @@ try {
     $downloadTimer.Stop()
     Write-Host ("[Log Collector] Download completed in {0:N1} seconds." -f $downloadTimer.Elapsed.TotalSeconds) -ForegroundColor Green
     Write-Host '[Log Collector] Automatic answers enabled: Extended logs = N, Data Residency = EU (2).' -ForegroundColor Cyan
+
+    # Check Point Log Collector v11 has an unhandled exception in Test-Port:
+    # TcpClient.ConnectAsync(...).Wait(250) throws when a hostname cannot be resolved.
+    # Patch only that exact function in memory so a failed DNS/TCP test is recorded
+    # as FAILED and the rest of the vendor collector continues normally.
+    $oldTestPort = @'
+function Test-Port {
+    param(
+        $RemoteHost,
+        $Port
+    )
+
+    $TCPClient = [System.Net.Sockets.TcpClient]::new()
+    $Result = $TCPClient.ConnectAsync($RemoteHost, $Port).Wait(250)
+    $TCPClient.Close()
+    if($result -eq "True"){
+        $output = "TCP Port check for $RemoteHost on port $Port was a success!" 
+    } else {
+        $output = "TCP Port check for $RemoteHost on port $Port failed!"
+    }
+    
+    return($output)
+}
+'@
+
+    $newTestPort = @'
+function Test-Port {
+    param(
+        $RemoteHost,
+        $Port
+    )
+
+    $TCPClient = $null
+    try {
+        $TCPClient = [System.Net.Sockets.TcpClient]::new()
+        $connectTask = $TCPClient.ConnectAsync($RemoteHost, $Port)
+        $completed = $connectTask.Wait(250)
+
+        if ($completed -and $TCPClient.Connected) {
+            return "TCP Port check for $RemoteHost on port $Port was a success!"
+        }
+
+        return "TCP Port check for $RemoteHost on port $Port failed!"
+    }
+    catch {
+        # DNS failures and refused/unreachable connections are expected outcomes
+        # of a connectivity test and must not abort the entire log collector.
+        $reason = $_.Exception.Message
+        if ($_.Exception.InnerException) {
+            $reason = $_.Exception.InnerException.Message
+        }
+        return "TCP Port check for $RemoteHost on port $Port failed! Reason: $reason"
+    }
+    finally {
+        if ($null -ne $TCPClient) {
+            $TCPClient.Dispose()
+        }
+    }
+}
+'@
+
+    if ($logCollectorScript.Contains($oldTestPort)) {
+        $logCollectorScript = $logCollectorScript.Replace($oldTestPort, $newTestPort)
+        Write-Host '[Log Collector] Applied compatibility fix for Check Point v11 Test-Port DNS/TCP exception.' -ForegroundColor Green
+    }
+    else {
+        Write-Host '[Log Collector] WARNING: Check Point Test-Port function differs from the known v11 version; compatibility patch was not applied.' -ForegroundColor Yellow
+    }
+
     Write-Host '[Log Collector] Starting collector...' -ForegroundColor Yellow
     Write-Host
 
