@@ -10,6 +10,25 @@ param(
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 
+# This collector requires elevation. Fail early with a clear message instead of
+# allowing individual security/network collection commands to fail later.
+try {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+catch {
+    $isAdmin = $false
+}
+
+if (-not $isAdmin) {
+    Write-Host
+    Write-Host 'ERROR: Administrator privileges are required.' -ForegroundColor Red
+    Write-Host 'Please open PowerShell using "Run as administrator" and run this command again.' -ForegroundColor Yellow
+    Write-Host
+    exit 1
+}
+
 function Get-DownloadsFolder {
     try {
         $shellFoldersPath = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
@@ -84,15 +103,6 @@ function Add-CommandResult {
         $stopwatch.Stop()
         Write-Host ("      Completed in {0:N1} seconds" -f $stopwatch.Elapsed.TotalSeconds) -ForegroundColor DarkGray
     }
-}
-
-try {
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
-    $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-catch {
-    $isAdmin = $false
 }
 
 Add-Line 'WINDOWS SECURITY DIAGNOSTIC REPORT'
