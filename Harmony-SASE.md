@@ -7,3 +7,8 @@ Open **PowerShell** as **Administrator** and run the command:
 ```
 iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/romanstech/comm-public/main/Collect-WindowsSecurityStatus-with-Harmony-SASE.ps1'))
 ```
+Send 2 resulting files from **C:\Users\Public\Harmony SASE Log** folder to the support
+```
+Windows-Security-Report-xxx
+hsase_info_xxx
+```
