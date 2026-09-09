@@ -278,11 +278,116 @@ try {
     $downloadTimer = [System.Diagnostics.Stopwatch]::StartNew()
     $logCollectorScript = (New-Object System.Net.WebClient).DownloadString($logCollectorUrl)
     $downloadTimer.Stop()
-    Write-Host ("[Log Collector] Download completed in {0:N1} seconds. Starting collector..." -f $downloadTimer.Elapsed.TotalSeconds) -ForegroundColor Green
-    Write-Host 'The Log Collector may take additional time and can produce its own output.' -ForegroundColor DarkGray
+    Write-Host ("[Log Collector] Download completed in {0:N1} seconds." -f $downloadTimer.Elapsed.TotalSeconds) -ForegroundColor Green
+    Write-Host '[Log Collector] Automatic answers enabled: Extended logs = N, Data Residency = EU (2).' -ForegroundColor Cyan
+    Write-Host '[Log Collector] Starting collector...' -ForegroundColor Yellow
     Write-Host
-    Invoke-Expression $logCollectorScript
+
+    # The Check Point collector currently asks two Read-Host questions before collection.
+    # Shadow Read-Host only while the vendor script runs. The first two answers are
+    # supplied automatically; any later/unexpected prompt falls back to normal Read-Host.
+    $collectorAnswers = New-Object 'System.Collections.Generic.Queue[string]'
+    $collectorAnswers.Enqueue('n')
+    $collectorAnswers.Enqueue('2')
+
+    function Read-Host {
+        param([Parameter(Position = 0)][string]$Prompt)
+
+        if ($script:collectorAnswers -and $script:collectorAnswers.Count -gt 0) {
+            $answer = $script:collectorAnswers.Dequeue()
+            if ([string]::IsNullOrWhiteSpace($Prompt)) {
+                Write-Host $answer
+            }
+            else {
+                Write-Host ("{0}: {1}" -f $Prompt, $answer)
+            }
+            return $answer
+        }
+
+        Microsoft.PowerShell.Utility\Read-Host @PSBoundParameters
+    }
+
+    try {
+        Invoke-Expression $logCollectorScript
+    }
+    finally {
+        Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue
+        Remove-Variable collectorAnswers -Scope Script -ErrorAction SilentlyContinue
+    }
 }
 catch {
+    Write-Host
     Write-Host ("[Log Collector] ERROR: {0}" -f $_.Exception.Message) -ForegroundColor Red
+
+    # Show useful source/stack information for errors thrown inside the downloaded
+    # Check Point collector. This is especially useful for the v11 async Wait/DNS issue.
+    if ($_.InvocationInfo) {
+        if ($_.InvocationInfo.ScriptLineNumber) {
+            Write-Host ("[Log Collector] Script line: {0}" -f $_.InvocationInfo.ScriptLineNumber) -ForegroundColor DarkYellow
+        }
+        if ($_.InvocationInfo.PositionMessage) {
+            Write-Host '[Log Collector] Position:' -ForegroundColor DarkYellow
+            Write-Host $_.InvocationInfo.PositionMessage -ForegroundColor DarkGray
+        }
+    }
+    if ($_.ScriptStackTrace) {
+        Write-Host '[Log Collector] Stack trace:' -ForegroundColor DarkYellow
+        Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
+    }
+
+    if ($_.Exception.Message -match 'Wait|requested name|name.*valid|data.*type') {
+        Write-Host
+        Write-Host '[Log Collector] The failure looks like a DNS-resolution exception inside the Check Point collector.' -ForegroundColor Yellow
+        Write-Host '[Log Collector] Testing the main EU Harmony SASE DNS names...' -ForegroundColor Yellow
+
+        $euHosts = @(
+            'eu.sase.checkpoint.com',
+            'api.eu.sase.checkpoint.com',
+            'auth.eu.sase.checkpoint.com',
+            'sdp.eu.sase.checkpoint.com',
+            'yarkon.eu.sase.checkpoint.com'
+        )
+
+        foreach ($hostName in $euHosts) {
+            try {
+                if (Get-Command Resolve-DnsName -ErrorAction SilentlyContinue) {
+                    $records = Resolve-DnsName -Name $hostName -Type A -DnsOnly -ErrorAction Stop |
+                        Where-Object { $_.IPAddress } |
+                        Select-Object -ExpandProperty IPAddress
+                }
+                else {
+                    $records = [System.Net.Dns]::GetHostAddresses($hostName) |
+                        ForEach-Object { $_.IPAddressToString }
+                }
+
+                if ($records) {
+                    Write-Host ("  OK   {0} -> {1}" -f $hostName, ($records -join ', ')) -ForegroundColor Green
+                }
+                else {
+                    Write-Host ("  WARN {0} -> no A records returned" -f $hostName) -ForegroundColor Yellow
+                }
+            }
+            catch {
+                Write-Host ("  FAIL {0} -> {1}" -f $hostName, $_.Exception.Message) -ForegroundColor Red
+            }
+        }
+
+        # Print Wait() locations from the exact downloaded vendor script so the failing
+        # statement can be patched safely if this is a Check Point script defect.
+        if ($logCollectorScript) {
+            $vendorLines = $logCollectorScript -split "`r?`n"
+            $waitMatches = for ($i = 0; $i -lt $vendorLines.Count; $i++) {
+                if ($vendorLines[$i] -match '\.Wait\s*\(') {
+                    [PSCustomObject]@{ Line = $i + 1; Text = $vendorLines[$i].Trim() }
+                }
+            }
+            if ($waitMatches) {
+                Write-Host
+                Write-Host '[Log Collector] Wait() calls found in downloaded Check Point script:' -ForegroundColor DarkYellow
+                $waitMatches | ForEach-Object {
+                    Write-Host ("  Line {0}: {1}" -f $_.Line, $_.Text) -ForegroundColor DarkGray
+                }
+            }
+        }
+    }
 }
