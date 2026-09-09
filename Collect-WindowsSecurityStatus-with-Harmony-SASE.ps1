@@ -282,29 +282,9 @@ try {
     Write-Host '[Log Collector] Automatic answers enabled: Extended logs = N, Data Residency = EU (2).' -ForegroundColor Cyan
 
     # Check Point Log Collector v11 has an unhandled exception in Test-Port:
-    # TcpClient.ConnectAsync(...).Wait(250) throws when a hostname cannot be resolved.
-    # Patch only that exact function in memory so a failed DNS/TCP test is recorded
-    # as FAILED and the rest of the vendor collector continues normally.
-    $oldTestPort = @'
-function Test-Port {
-    param(
-        $RemoteHost,
-        $Port
-    )
-
-    $TCPClient = [System.Net.Sockets.TcpClient]::new()
-    $Result = $TCPClient.ConnectAsync($RemoteHost, $Port).Wait(250)
-    $TCPClient.Close()
-    if($result -eq "True"){
-        $output = "TCP Port check for $RemoteHost on port $Port was a success!" 
-    } else {
-        $output = "TCP Port check for $RemoteHost on port $Port failed!"
-    }
-    
-    return($output)
-}
-'@
-
+    # TcpClient.ConnectAsync(...).Wait(250) throws when DNS resolution or the TCP
+    # connection fails. Replace the complete Test-Port function by boundaries rather
+    # than exact text, so CRLF/whitespace/vendor formatting changes do not break the patch.
     $newTestPort = @'
 function Test-Port {
     param(
@@ -316,7 +296,17 @@ function Test-Port {
     try {
         $TCPClient = [System.Net.Sockets.TcpClient]::new()
         $connectTask = $TCPClient.ConnectAsync($RemoteHost, $Port)
-        $completed = $connectTask.Wait(250)
+
+        try {
+            $completed = $connectTask.Wait(250)
+        }
+        catch {
+            $reason = $_.Exception.Message
+            if ($_.Exception.InnerException) {
+                $reason = $_.Exception.InnerException.Message
+            }
+            return "TCP Port check for $RemoteHost on port $Port failed! Reason: $reason"
+        }
 
         if ($completed -and $TCPClient.Connected) {
             return "TCP Port check for $RemoteHost on port $Port was a success!"
@@ -325,8 +315,6 @@ function Test-Port {
         return "TCP Port check for $RemoteHost on port $Port failed!"
     }
     catch {
-        # DNS failures and refused/unreachable connections are expected outcomes
-        # of a connectivity test and must not abort the entire log collector.
         $reason = $_.Exception.Message
         if ($_.Exception.InnerException) {
             $reason = $_.Exception.InnerException.Message
@@ -339,14 +327,28 @@ function Test-Port {
         }
     }
 }
+
 '@
 
-    if ($logCollectorScript.Contains($oldTestPort)) {
-        $logCollectorScript = $logCollectorScript.Replace($oldTestPort, $newTestPort)
+    $testPortStart = $logCollectorScript.IndexOf('function Test-Port {', [System.StringComparison]::Ordinal)
+    $testPortEndMarker = '#Get Certificate information'
+    $testPortEnd = $logCollectorScript.IndexOf($testPortEndMarker, $testPortStart, [System.StringComparison]::Ordinal)
+
+    if ($testPortStart -ge 0 -and $testPortEnd -gt $testPortStart) {
+        $beforeTestPort = $logCollectorScript.Substring(0, $testPortStart)
+        $afterTestPort = $logCollectorScript.Substring($testPortEnd)
+        $logCollectorScript = $beforeTestPort + $newTestPort + $afterTestPort
+
         Write-Host '[Log Collector] Applied compatibility fix for Check Point v11 Test-Port DNS/TCP exception.' -ForegroundColor Green
+
+        # Verify that the dangerous vendor Wait() call was actually removed before execution.
+        if ($logCollectorScript -match '\$TCPClient\.ConnectAsync\(\$RemoteHost,\s*\$Port\)\.Wait\(250\)') {
+            throw 'Compatibility patch verification failed: original Test-Port Wait(250) call is still present.'
+        }
+        Write-Host '[Log Collector] Patch verification passed.' -ForegroundColor Green
     }
     else {
-        Write-Host '[Log Collector] WARNING: Check Point Test-Port function differs from the known v11 version; compatibility patch was not applied.' -ForegroundColor Yellow
+        throw 'Unable to locate the Test-Port function boundaries in the downloaded Check Point collector. Vendor script was not executed.'
     }
 
     Write-Host '[Log Collector] Starting collector...' -ForegroundColor Yellow
