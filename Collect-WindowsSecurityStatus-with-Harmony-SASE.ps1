@@ -23,10 +23,19 @@ catch {
 
 if (-not $isAdmin) {
     Write-Host
-    Write-Host 'ERROR: Administrator privileges are required.' -ForegroundColor Red
-    Write-Host 'Please open PowerShell using "Run as administrator" and run this command again.' -ForegroundColor Yellow
+    Write-Host ('=' * 78) -ForegroundColor Red
+    Write-Host '  ERROR: THIS POWERSHELL SESSION IS NOT RUNNING AS ADMINISTRATOR' -ForegroundColor Red
+    Write-Host ('=' * 78) -ForegroundColor Red
     Write-Host
-    exit 1
+    Write-Host 'This diagnostic collector requires Administrator privileges.' -ForegroundColor Yellow
+    Write-Host 'Close this session, open PowerShell with "Run as administrator",' -ForegroundColor Yellow
+    Write-Host 'and run the same command again.' -ForegroundColor Yellow
+    Write-Host
+
+    # IMPORTANT: do not use Exit here. This script is commonly launched through
+    # Invoke-Expression (iex); Exit would terminate the caller's PowerShell host and
+    # can make this message disappear before the user has a chance to read it.
+    return
 }
 
 function Get-DownloadsFolder {
