@@ -51,7 +51,8 @@ function Get-DownloadsFolder {
 }
 
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
-    $OutputDirectory = Get-DownloadsFolder
+    # Use the same directory as the Check Point Harmony SASE Log Collector.
+    $OutputDirectory = 'C:\Users\Public\Harmony SASE Logfiles'
 }
 
 try {
@@ -288,7 +289,7 @@ Write-Host
 Write-Host 'Done. The security report was saved to:' -ForegroundColor Green
 Write-Host $reportPath -ForegroundColor Cyan
 Write-Host
-Write-Host 'Please send this TXT file to your support contact.'
+Write-Host 'This TXT report is stored alongside the Harmony SASE support logs.'
 Write-Host
 Write-Host '[Log Collector] Downloading Check Point support Log Collector...' -ForegroundColor Yellow
 $logCollectorUrl = 'https://supportbucketshare.s3.us-east-1.amazonaws.com/Custom+Scripts/Log+Collector/Log+Collector+PS.ps1'
@@ -480,4 +481,10 @@ catch {
             }
         }
     }
+}
+
+Write-Host
+Write-Host '[Done] Opening log folder...' -ForegroundColor Green
+if (Test-Path -LiteralPath $OutputDirectory) {
+    Start-Process explorer.exe -ArgumentList "`"$OutputDirectory`""
 }
